@@ -307,6 +307,8 @@ func (d *device) eventLoop(state *syncCallbackState) error {
 	return nil
 }
 
+// TODO: Implement WriteSame
+
 // this is not safe to run in a goroutine other than the one
 // where all other operations on the iscsi connection are
 // being performed
