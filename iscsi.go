@@ -13,9 +13,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"log/slog"
+	"os"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -30,7 +30,7 @@ import (
 var defaultLogger = atomic.Pointer[slog.Logger]{}
 
 func init() {
-	defaultLogger.Store(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
+	defaultLogger.Store(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	})))
 }
