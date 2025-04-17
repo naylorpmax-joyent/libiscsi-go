@@ -43,12 +43,15 @@ func (w *writer) WriteAt(p []byte, off int64) (n int, err error) {
 	// find our starting lba
 	startBlock := off / w.blocksize
 	endOffset := len(p) + int(off)
-	blocks := (endOffset-int(off))/int(w.blocksize) + 1
+	blocks := (endOffset - int(off)) / int(w.blocksize)
+	if len(p)%int(w.blocksize) != 0 {
+		blocks++
+	}
 	blocks = min(blocks, int(w.lba)-int(startBlock))
 
 	var written int
-	for block := 1; block < blocks; block++ {
-		start := startBlock * int64(block)
+	for block := range blocks {
+		start := startBlock + int64(block)*w.blocksize
 		end := min(start+w.blocksize, int64(len(p)))
 
 		fmt.Printf("startBlock=%d block=%d blocks=%d\n", startBlock, block, blocks)
