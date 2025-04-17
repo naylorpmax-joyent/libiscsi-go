@@ -47,21 +47,22 @@ func (w *writer) WriteAt(p []byte, off int64) (n int, err error) {
 	blocks = min(blocks, int(w.lba)-int(startBlock))
 
 	var written int
-	blocks = min(blocks, int(w.lba)-int(startBlock))
 	for block := 0; block < blocks; block++ {
 		start := startBlock * int64(block)
 		end := min(start+w.blocksize, int64(len(p)))
 
 		// pad data if it's smaller than a block
 		data := p[start:end]
+		fmt.Printf("start=%d end=%d len=%d - before adjustments\n", start, end, len(data))
 
-		fmt.Printf("start=%d end=%d len=%d- before adjustments\n", start, end, len(data))
-		if int64(len(p)) < w.blocksize {
+		short := len(data) % int(w.blocksize)
+		if short != 0 {
 			data = make([]byte, w.blocksize)
 			copy(data, p[start:end])
 
-			end = w.blocksize
+			end = start + w.blocksize
 		}
+
 		fmt.Printf("start=%d end=%d len=%d - after adjustments\n", start, end, len(data))
 
 		writeErr := w.dev.Write16(Write16{
