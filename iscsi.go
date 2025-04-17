@@ -31,7 +31,7 @@ var defaultLogger = atomic.Pointer[slog.Logger]{}
 
 func init() {
 	defaultLogger.Store(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
-		Level: slog.LevelError,
+		Level: slog.LevelDebug,
 	})))
 }
 
