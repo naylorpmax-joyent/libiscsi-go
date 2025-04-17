@@ -83,6 +83,7 @@ func (d *device) initializeContext() error {
 	iqnStr := C.CString(d.details.InitiatorIQN)
 	defer C.free(unsafe.Pointer(iqnStr))
 	ctx := C.iscsi_create_context(iqnStr)
+
 	targetStr := C.CString(d.details.TargetURL)
 	defer C.free(unsafe.Pointer(targetStr))
 	url := C.iscsi_parse_full_url(ctx, targetStr)

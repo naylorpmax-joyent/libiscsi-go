@@ -53,13 +53,18 @@ func (w *writer) WriteAt(p []byte, off int64) (n int, err error) {
 	}
 
 	blocks = min(blocks, int(w.lba)-int(startBlock))
-	writeErr := w.dev.Write16(Write16{
-		LBA:       int(startBlock),
-		BlockSize: int(w.blocksize),
-		Data:      p,
-	})
-	if writeErr != nil {
-		return 0, fmt.Errorf("iscsi device write error: %w", writeErr)
+	for block := range blocks {
+		start := startBlock * int64(block)
+		end := min(start+w.blocksize, int64(len(p)))
+
+		writeErr := w.dev.Write16(Write16{
+			LBA:       int(start),
+			BlockSize: int(end - start),
+			Data:      p[start:end],
+		})
+		if writeErr != nil {
+			return 0, fmt.Errorf("iscsi device write error: %w", writeErr)
+		}
 	}
 
 	logger().Debug("finished write", slog.Int("length", len(p)))
