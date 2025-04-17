@@ -58,7 +58,11 @@ func (w *writer) WriteAt(p []byte, off int64) (n int, err error) {
 
 	var written int
 	for block := range blocks {
-		start := off + int64(block)*w.blocksize
+		// device offset
+		lba := off + int64(block)*w.blocksize
+
+		// data offsets
+		start := int64(block) * w.blocksize
 		end := start + min(w.blocksize, size)
 
 		logger().Debug(fmt.Sprintf("startBlock=%d block=%d blocks=%d",
@@ -81,7 +85,7 @@ func (w *writer) WriteAt(p []byte, off int64) (n int, err error) {
 			start, end, len(data)))
 
 		writeErr := w.dev.Write16(Write16{
-			LBA:       int(start),
+			LBA:       int(lba),
 			BlockSize: int(w.blocksize),
 			Data:      data,
 		})
