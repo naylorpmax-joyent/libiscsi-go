@@ -41,21 +41,25 @@ func (w *writer) WriteAt(p []byte, off int64) (n int, err error) {
 	logger().Debug("WriteAt", slog.Int("bytes", len(p)), slog.Int("offset", int(off)))
 
 	// find our starting lba
-	startBlock := off / w.blocksize
-	endOffset := int64(len(p)) + off
-	blocks := int((endOffset - off) / w.blocksize)
+	var (
+		size      = int64(len(p))
+		endOffset = size + off
+
+		startBlock = off / w.blocksize
+		blocks     = int(size / w.blocksize)
+	)
 	if len(p)%int(w.blocksize) != 0 {
-		blocks++
+		blocks++ // need an extra block if there's some leftover data + padding
 	}
 	blocks = min(blocks, int(w.lba-startBlock))
 
 	logger().Debug(fmt.Sprintf("blocks: %d, start-end: %d-%d, remainder=%d",
-		blocks, startBlock, endOffset, len(p)%int(w.blocksize)))
+		blocks, off, endOffset, len(p)%int(w.blocksize)))
 
 	var written int
 	for block := range blocks {
 		start := off + int64(block)*w.blocksize
-		end := min(start+w.blocksize, int64(len(p)))
+		end := start + min(w.blocksize, size)
 
 		logger().Debug(fmt.Sprintf("startBlock=%d block=%d blocks=%d",
 			startBlock, block, blocks))
@@ -70,7 +74,7 @@ func (w *writer) WriteAt(p []byte, off int64) (n int, err error) {
 			data = make([]byte, w.blocksize)
 			copy(data, p[start:end])
 
-			end = start + w.blocksize
+			end += int64(short)
 		}
 
 		logger().Debug(fmt.Sprintf("start=%d end=%d len=%d - after adjustments",
