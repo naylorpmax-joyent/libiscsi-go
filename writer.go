@@ -40,7 +40,11 @@ func (w *writer) WriteAt(p []byte, off int64) (n int, err error) {
 		logger().Debug("offset past at EOF", slog.Int("offset", int(off)))
 		return 0, io.EOF
 	}
-
+	if len(p)%int(w.blocksize) != 0 {
+		return 0, fmt.Errorf(
+			"number of bytes %d not divisible by block size %d", len(p), w.blocksize,
+		)
+	}
 	logger().Debug("WriteAt", slog.Int("bytes", len(p)), slog.Int("offset", int(off)))
 
 	startBlock := off / w.blocksize
@@ -58,27 +62,16 @@ func (w *writer) WriteAt(p []byte, off int64) (n int, err error) {
 		start := int64(block) * w.blocksize
 		end := start + min(w.blocksize, size)
 
-		// pad data if it's smaller than a block
-		data := p[start:end]
-
-		short := len(data) % int(w.blocksize)
-		if short != 0 {
-			data = make([]byte, w.blocksize)
-			copy(data, p[start:end])
-
-			end += int64(short)
-		}
-
 		writeErr := w.dev.Write16(Write16{
 			LBA:       int(lba),
 			BlockSize: int(w.blocksize),
-			Data:      data,
+			Data:      p[start:end],
 		})
 		if writeErr != nil {
 			return written, fmt.Errorf("iscsi device write error: %w", writeErr)
 		}
 
-		written += len(data)
+		written += len(p[start:end])
 	}
 
 	logger().Debug("finished write", slog.Int("length", len(p)))
