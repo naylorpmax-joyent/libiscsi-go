@@ -195,7 +195,7 @@ type Write16 struct {
 }
 
 func (d *device) Write16(data Write16) error {
-	logger().Debug("Write16", slog.Any("request", data))
+	// logger().Debug("Write16", slog.Any("request", data))
 	state := &syncCallbackState{}
 	pdata := gopointer.Save(state)
 	defer gopointer.Unref(pdata)
@@ -225,7 +225,7 @@ func (d *device) Write16(data Write16) error {
 		errstr := C.iscsi_get_error(d.Context)
 		return fmt.Errorf("iscsi_write16_sync: %s", C.GoString(errstr))
 	}
-	logger().Debug("Write16 done", slog.Any("request", data))
+	// logger().Debug("Write16 done", slog.Any("request", data))
 	return nil
 }
 

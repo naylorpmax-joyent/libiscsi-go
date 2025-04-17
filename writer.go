@@ -54,7 +54,7 @@ func (w *writer) WriteAt(p []byte, off int64) (n int, err error) {
 
 	var written int
 	for block := range blocks {
-		start := startBlock + int64(block)*w.blocksize
+		start := off + int64(block)*w.blocksize
 		end := min(start+w.blocksize, int64(len(p)))
 
 		logger().Debug(fmt.Sprintf("startBlock=%d block=%d blocks=%d",
