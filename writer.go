@@ -35,7 +35,7 @@ func (w *writer) Close() error {
 
 func (w *writer) WriteAt(p []byte, off int64) (n int, err error) {
 	size := int64(len(p))
-	endOffset := size + off
+	endOffset := off + size
 	if endOffset >= w.blocksize*w.lba {
 		logger().Debug("offset past at EOF", slog.Int("offset", int(off)))
 		return 0, io.EOF
@@ -52,8 +52,7 @@ func (w *writer) WriteAt(p []byte, off int64) (n int, err error) {
 
 	var written int
 	for block := range blocks {
-		// device offset
-		lba := off + int64(block)*w.blocksize
+		lba := startBlock + int64(block)*w.blocksize
 
 		// data offsets
 		start := int64(block) * w.blocksize
