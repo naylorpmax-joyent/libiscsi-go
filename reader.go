@@ -7,11 +7,15 @@ import (
 	"log/slog"
 )
 
+var ErrDeviceClosed = errors.New("device is closed")
+
 type reader struct {
 	dev       *device
 	lba       int64
 	offset    int64
 	blocksize int64
+
+	closed bool
 }
 
 func Reader(dev *device) (*reader, error) {
@@ -28,10 +32,19 @@ func Reader(dev *device) (*reader, error) {
 }
 
 func (r *reader) Close() error {
+	if r.closed {
+		return nil
+	}
+
+	defer func() { r.closed = true }()
 	return r.dev.Disconnect()
 }
 
 func (r *reader) Read(p []byte) (n int, err error) {
+	if r.closed {
+		return 0, ErrDeviceClosed
+	}
+
 	logger().Debug("ReadAt", slog.Int("bytes", len(p)), slog.Int("offset", int(r.offset)))
 	readLen, err := r.ReadAt(p, r.offset)
 	r.offset += int64(readLen)
@@ -39,6 +52,10 @@ func (r *reader) Read(p []byte) (n int, err error) {
 }
 
 func (r *reader) ReadAt(p []byte, off int64) (n int, err error) {
+	if r.closed {
+		return 0, ErrDeviceClosed
+	}
+
 	if off >= r.blocksize*r.lba {
 		logger().Debug("offset past at EOF", slog.Int("offset", int(off)))
 		return 0, io.EOF
@@ -93,6 +110,10 @@ func (r *reader) ReadAt(p []byte, off int64) (n int, err error) {
 
 // TODO: (willgorman) tests
 func (r *reader) Seek(offset int64, whence int) (int64, error) {
+	if r.closed {
+		return 0, ErrDeviceClosed
+	}
+
 	var abs int64
 	switch whence {
 	case io.SeekStart:

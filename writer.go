@@ -10,8 +10,9 @@ import (
 type writer struct {
 	dev       *device
 	lba       int64
-	offset    int64
 	blocksize int64
+
+	closed bool
 }
 
 var ErrMaxLBA = errors.New("sorry mate you've gone too far")
@@ -24,16 +25,24 @@ func Writer(dev *device) (*writer, error) {
 	return &writer{
 		dev:       dev,
 		lba:       int64(c.MaxLBA) + 1,
-		offset:    0,
 		blocksize: int64(c.BlockSize),
 	}, nil
 }
 
 func (w *writer) Close() error {
+	if w.closed {
+		return nil
+	}
+
+	defer func() { w.closed = true }()
 	return w.dev.Disconnect()
 }
 
 func (w *writer) WriteAt(p []byte, off int64) (n int, err error) {
+	if w.closed {
+		return 0, ErrDeviceClosed
+	}
+
 	size := int64(len(p))
 	endOffset := off + size
 	if endOffset >= w.blocksize*w.lba {
@@ -45,6 +54,7 @@ func (w *writer) WriteAt(p []byte, off int64) (n int, err error) {
 			"number of bytes %d not divisible by block size %d", len(p), w.blocksize,
 		)
 	}
+
 	logger().Debug("WriteAt", slog.Int("bytes", len(p)), slog.Int("offset", int(off)))
 
 	startBlock := off / w.blocksize
