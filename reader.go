@@ -1,25 +1,34 @@
 package iscsi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 )
 
+var ErrDeviceClosed = errors.New("device is closed")
+
 type reader struct {
+	ctx       context.Context
+	cancel    context.CancelFunc
 	dev       *device
 	lba       int64
 	offset    int64
 	blocksize int64
 }
 
-func Reader(dev *device) (*reader, error) {
+func Reader(ctx context.Context, dev *device) (*reader, error) {
 	c, err := dev.ReadCapacity16()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get capacity of device: %w", err)
 	}
+	ctx, cancel := context.WithCancel(ctx)
+
 	return &reader{
+		ctx:       ctx,
+		cancel:    cancel,
 		dev:       dev,
 		lba:       int64(c.MaxLBA) + 1,
 		offset:    0,
@@ -28,11 +37,15 @@ func Reader(dev *device) (*reader, error) {
 }
 
 func (r *reader) Close() error {
+	if r.dev.closed.Load() {
+		return nil
+	}
+
+	r.cancel()
 	return r.dev.Disconnect()
 }
 
 func (r *reader) Read(p []byte) (n int, err error) {
-	logger().Debug("ReadAt", slog.Int("bytes", len(p)), slog.Int("offset", int(r.offset)))
 	readLen, err := r.ReadAt(p, r.offset)
 	r.offset += int64(readLen)
 	return readLen, err
@@ -43,6 +56,7 @@ func (r *reader) ReadAt(p []byte, off int64) (n int, err error) {
 		logger().Debug("offset past at EOF", slog.Int("offset", int(off)))
 		return 0, io.EOF
 	}
+
 	logger().Debug("ReadAt", slog.Int("bytes", len(p)), slog.Int("offset", int(off)))
 	// find our starting lba
 	startBlock := off / r.blocksize
@@ -61,7 +75,7 @@ func (r *reader) ReadAt(p []byte, off int64) (n int, err error) {
 	}
 
 	blocks = min(blocks, int(r.lba)-int(startBlock))
-	readBytes, readErr := r.dev.Read16(Read16{
+	readBytes, readErr := r.dev.Read16(r.ctx, Read16{
 		LBA:       int(startBlock),
 		BlockSize: int(r.blocksize),
 		Blocks:    blocks,

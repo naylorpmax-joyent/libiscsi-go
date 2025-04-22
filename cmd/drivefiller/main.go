@@ -1,12 +1,13 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"log"
 	"os"
 	"strconv"
 
-	iscsi "github.com/willgorman/libiscsi-go"
+	iscsi "github.com/naylorpmax-joyent/libiscsi-go"
 )
 
 func main() {
@@ -55,7 +56,7 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		err = device.Write16(iscsi.Write16{
+		err = device.Write16(context.TODO(), iscsi.Write16{
 			LBA:       currentBlock,
 			Data:      data,
 			BlockSize: capacity.BlockSize,

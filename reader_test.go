@@ -2,6 +2,7 @@ package iscsi_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -11,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	iscsi "github.com/willgorman/libiscsi-go"
+	iscsi "github.com/naylorpmax-joyent/libiscsi-go"
 	"gotest.tools/assert"
 )
 
@@ -45,7 +46,7 @@ func TestRead(t *testing.T) {
 		_ = device.Disconnect()
 	}()
 
-	sreader, err := iscsi.Reader(device)
+	sreader, err := iscsi.Reader(context.TODO(), device)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +88,7 @@ func TestReadRandom(t *testing.T) {
 		_ = device.Disconnect()
 	}()
 
-	sreader, err := iscsi.Reader(device)
+	sreader, err := iscsi.Reader(context.TODO(), device)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +136,7 @@ func TestReadLoop(t *testing.T) {
 
 	for i := 0; i < 1000; i++ {
 		t.Log("LOOP ", i)
-		sreader, err := iscsi.Reader(device)
+		sreader, err := iscsi.Reader(context.TODO(), device)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -200,7 +201,7 @@ func TestSectionRead(t *testing.T) {
 	sectionChecksum := fmt.Sprintf("%x", hash.Sum(nil))
 	t.Log("SECTION CHECKSUM", sectionChecksum)
 
-	reader, err := iscsi.Reader(device)
+	reader, err := iscsi.Reader(context.TODO(), device)
 	if err != nil {
 		t.Fatal(err)
 	}

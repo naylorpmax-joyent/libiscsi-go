@@ -1,6 +1,7 @@
 package iscsi_test
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"os"
@@ -13,7 +14,7 @@ import (
 	"github.com/gostor/gotgt/pkg/scsi"
 	_ "github.com/gostor/gotgt/pkg/scsi/backingstore"
 	"github.com/hashicorp/consul/sdk/freeport"
-	iscsi "github.com/willgorman/libiscsi-go"
+	iscsi "github.com/naylorpmax-joyent/libiscsi-go"
 	"gotest.tools/assert"
 )
 
@@ -144,12 +145,12 @@ func TestWithGoTGT(t *testing.T) {
 	write := make([]byte, capacity.BlockSize)
 	copy(write, []byte("hello!"))
 
-	err = device.Write16(iscsi.Write16{LBA: 0, Data: write, BlockSize: capacity.BlockSize})
+	err = device.Write16(context.TODO(), iscsi.Write16{LBA: 0, Data: write, BlockSize: capacity.BlockSize})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	data, err := device.Read16(iscsi.Read16{LBA: 0, Blocks: 1, BlockSize: capacity.BlockSize})
+	data, err := device.Read16(context.TODO(), iscsi.Read16{LBA: 0, Blocks: 1, BlockSize: capacity.BlockSize})
 	if err != nil {
 		t.Fatal(err)
 	}

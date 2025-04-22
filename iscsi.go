@@ -13,9 +13,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"log/slog"
+	"os"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -30,7 +31,7 @@ import (
 var defaultLogger = atomic.Pointer[slog.Logger]{}
 
 func init() {
-	defaultLogger.Store(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
+	defaultLogger.Store(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelError,
 	})))
 }
@@ -48,14 +49,20 @@ type (
 )
 
 type device struct {
-	Context      iscsiContext
-	targetName   string
-	targetPortal string
-	targetLun    int
-	details      ConnectionDetails
+	details ConnectionDetails
 	// TODO: (willgorman) iscsiContext has a timeout (set with iscsi_set_timeout)
 	// but it's not exported and there's no get function. need to track timeout in
 	// device
+
+	closed  atomic.Bool
+	Context locker[iscsiContext]
+	Target  target
+}
+
+type target struct {
+	Name   string
+	Portal string
+	LUN    int
 }
 
 type ConnectionDetails struct {
@@ -73,69 +80,105 @@ func New(details ConnectionDetails) *device {
 }
 
 func (d *device) initializeContext() error {
-	if d.Context != nil {
-		_ = C.iscsi_destroy_context(d.Context)
-		d.Context = nil
-		d.targetLun = 0
-		d.targetName = ""
-		d.targetPortal = ""
-	}
 	iqnStr := C.CString(d.details.InitiatorIQN)
 	defer C.free(unsafe.Pointer(iqnStr))
-	ctx := C.iscsi_create_context(iqnStr)
+
+	newCtx := iscsiContext(C.iscsi_create_context(iqnStr))
+	oldCtx, ok := d.Context.Swap("initialize-context", &newCtx)
+	if ok {
+		_ = C.iscsi_destroy_context(*oldCtx)
+	}
+	defer d.Context.Release("initialize-context")
+
 	targetStr := C.CString(d.details.TargetURL)
 	defer C.free(unsafe.Pointer(targetStr))
-	url := C.iscsi_parse_full_url(ctx, targetStr)
+	url := C.iscsi_parse_full_url(newCtx, targetStr)
 
 	if url == nil {
-		return fmt.Errorf("error parsing target url: %v", C.GoString(C.iscsi_get_error(ctx)))
+		return fmt.Errorf("error parsing target url: %v", C.GoString(C.iscsi_get_error(newCtx)))
 	}
 
-	_ = C.iscsi_set_targetname(ctx, &url.target[0])
+	_ = C.iscsi_set_targetname(newCtx, &url.target[0])
 	defer C.iscsi_destroy_url(url)
-	d.Context = ctx
-	d.targetLun = int(url.lun)
-	d.targetName = C.GoString(&url.target[0])
-	d.targetPortal = C.GoString(&url.portal[0])
-	_ = C.iscsi_set_session_type(d.Context, C.ISCSI_SESSION_NORMAL)
-	_ = C.iscsi_set_header_digest(d.Context, C.ISCSI_HEADER_DIGEST_NONE_CRC32C)
+
+	d.Target = target{
+		LUN:    int(url.lun),
+		Name:   C.GoString(&url.target[0]),
+		Portal: C.GoString(&url.portal[0]),
+	}
+
+	_ = C.iscsi_set_session_type(newCtx, C.ISCSI_SESSION_NORMAL)
+	_ = C.iscsi_set_header_digest(newCtx, C.ISCSI_HEADER_DIGEST_NONE_CRC32C)
 	return nil
 }
 
 func (d *device) Connect() error {
-	if err := d.initializeContext(); err != nil {
-		return err
-	}
 	return retry.Do(func() error {
-		portalStr := C.CString(d.targetPortal)
+		// reset the context before retrying.  it seems like some connection
+		// errors leave the context in an inconsistent state that makes it
+		// difficult to reuse
+		if err := d.initializeContext(); err != nil {
+			return err
+		}
+
+		ctx, ok := d.Context.Acquire("connect")
+		if !ok {
+			return ErrDeviceClosed
+		}
+		defer d.Context.Release("connect")
+
+		portalStr := C.CString(d.Target.Portal)
 		defer C.free(unsafe.Pointer(portalStr))
-		if retval := C.iscsi_full_connect_sync(d.Context, portalStr, C.int(d.targetLun)); retval != 0 {
-			errstr := C.iscsi_get_error(d.Context)
-			// reset the context before retrying.  it seems like some connection
-			// errors leave the context in an inconsistent state that makes it
-			// difficult to reuse
-			d.initializeContext()
+
+		if retval := C.iscsi_full_connect_sync(*ctx, portalStr, C.int(d.Target.LUN)); retval != 0 {
+			errstr := C.iscsi_get_error(*ctx)
 			return fmt.Errorf("iscsi_full_connect_sync: (%d) %s", retval, C.GoString(errstr))
 		}
+
 		return nil
 	}, retry.Attempts(20), retry.MaxDelay(500*time.Millisecond))
 }
 
+// FIXME
 func (d *device) Reconnect() error {
-	if retval := C.iscsi_reconnect_sync(d.Context); retval != 0 {
-		if retval != 0 {
-			return fmt.Errorf("failed to reconnect with: %d", retval)
+	ctx, _ := d.Context.Acquire("reconnect")
+	defer d.Context.Release("reconnect")
+
+	err := retry.Do(func() error {
+		if retval := C.iscsi_reconnect_sync(*ctx); retval != 0 {
+			errstr := C.iscsi_get_error(*ctx)
+			return fmt.Errorf("failed to reconnect with: (%d) %s", retval, C.GoString(
+				errstr,
+			))
 		}
+		return nil
+	}, retry.Attempts(20), retry.MaxDelay(500*time.Millisecond))
+	if err != nil {
+		return err
 	}
+
+	d.closed.Store(false)
 	return nil
 }
 
 func (d *device) Disconnect() error {
-	defer C.iscsi_destroy_context(d.Context)
-	retval := C.iscsi_logout_sync(d.Context)
+	if d.closed.Load() {
+		return nil
+	}
+	defer d.closed.Store(true)
+
+	oldCtx, ok := d.Context.Swap("disconnect", nil)
+	if !ok {
+		return nil
+	}
+	defer d.Context.Release("disconnect")
+
+	defer C.iscsi_destroy_context(*oldCtx)
+	retval := C.iscsi_logout_sync(*oldCtx)
 	if retval != 0 {
 		return fmt.Errorf("failed to logout with: %d", retval)
 	}
+
 	return nil
 }
 
@@ -145,15 +188,21 @@ type Capacity struct {
 	BlockSize int
 }
 
-func (d device) ReadCapacity10() (c Capacity, err error) {
-	task := C.iscsi_readcapacity10_sync(d.Context, 0, 0, 0)
+func (d *device) ReadCapacity10() (c Capacity, err error) {
+	ctx, ok := d.Context.Acquire("read-capacity")
+	if !ok {
+		return Capacity{}, ErrDeviceClosed
+	}
+	defer d.Context.Release("read-capacity")
+
+	task := C.iscsi_readcapacity10_sync(*ctx, 0, 0, 0)
 	defer func() {
 		if task != nil {
 			C.scsi_free_scsi_task(task)
 		}
 	}()
 	if task == nil || task.status != C.SCSI_STATUS_GOOD {
-		errstr := C.iscsi_get_error(d.Context)
+		errstr := C.iscsi_get_error(*ctx)
 		return c, fmt.Errorf("iscsi_readcapacity10_sync: %s", C.GoString(errstr))
 	}
 	readcapacity, err := getReadCapacity10(*task)
@@ -166,15 +215,21 @@ func (d device) ReadCapacity10() (c Capacity, err error) {
 	return c, nil
 }
 
-func (d device) ReadCapacity16() (c Capacity, err error) {
-	task := C.iscsi_readcapacity16_sync(d.Context, 0)
+func (d *device) ReadCapacity16() (c Capacity, err error) {
+	ctx, ok := d.Context.Acquire("read-capacity")
+	if !ok {
+		return Capacity{}, ErrDeviceClosed
+	}
+	defer d.Context.Release("read-capacity")
+
+	task := C.iscsi_readcapacity16_sync(*ctx, 0)
 	defer func() {
 		if task != nil {
 			C.scsi_free_scsi_task(task)
 		}
 	}()
 	if task == nil || task.status != C.SCSI_STATUS_GOOD {
-		errstr := C.iscsi_get_error(d.Context)
+		errstr := C.iscsi_get_error(*ctx)
 		return c, fmt.Errorf("iscsi_readcapacity16_sync: %s", C.GoString(errstr))
 	}
 	readcapacity, err := getReadCapacity16(*task)
@@ -193,7 +248,13 @@ type Write16 struct {
 	BlockSize int
 }
 
-func (d *device) Write16(data Write16) error {
+func (d *device) Write16(ctx context.Context, data Write16) error {
+	deviceCtx, ok := d.Context.Acquire("write")
+	if !ok {
+		return ErrDeviceClosed
+	}
+	defer d.Context.Release("write")
+
 	logger().Debug("Write16", slog.Any("request", data))
 	state := &syncCallbackState{}
 	pdata := gopointer.Save(state)
@@ -201,15 +262,16 @@ func (d *device) Write16(data Write16) error {
 	carr := []C.uchar(string(data.Data))
 	// TODO: (willgorman) figure out why larger blocksizes cause SCSI_SENSE_ASCQ_INVALID_FIELD_IN_INFORMATION_UNIT
 	if C.iscsi_write16_task(
-		d.Context, 0, C.uint64_t(data.LBA), &carr[0], C.uint(len(carr)),
+		*deviceCtx, 0, C.uint64_t(data.LBA), &carr[0], C.uint(len(carr)),
 		C.int(data.BlockSize), 0, 0, 0, 0, 0, syncCB, pdata,
 	) == nil {
 		return errors.New("unable to start iscsi_write16_task")
 	}
 
-	if err := d.eventLoop(state); err != nil {
+	if err := d.ProcessAsync(ctx, deviceCtx, state); err != nil {
 		return fmt.Errorf("error while waiting for task completion: %w", err)
 	}
+
 	task := state.scsiTask
 	if task != nil {
 		defer C.scsi_free_scsi_task(task)
@@ -221,9 +283,10 @@ func (d *device) Write16(data Write16) error {
 		// (task->status == SCSI_STATUS_CHECK_CONDITION &&
 		//  task->sense.key == SCSI_SENSE_ILLEGAL_REQUEST &&
 		//  task->sense.ascq == SCSI_SENSE_ASCQ_INVALID_FIELD_IN_INFORMATION_UNIT);
-		errstr := C.iscsi_get_error(d.Context)
+		errstr := C.iscsi_get_error(*deviceCtx)
 		return fmt.Errorf("iscsi_write16_sync: %s", C.GoString(errstr))
 	}
+
 	logger().Debug("Write16 done", slog.Any("request", data))
 	return nil
 }
@@ -234,19 +297,26 @@ type Read16 struct {
 	BlockSize int
 }
 
-func (d *device) Read16(data Read16) ([]byte, error) {
+func (d *device) Read16(ctx context.Context, data Read16) ([]byte, error) {
+	deviceCtx, ok := d.Context.Acquire("read")
+	if !ok {
+		return nil, ErrDeviceClosed
+	}
+	defer d.Context.Release("read")
+
+	logger().Debug("Read16", slog.Any("request", data))
 	state := &syncCallbackState{}
 	pdata := gopointer.Save(state)
 	defer gopointer.Unref(pdata)
 
 	if C.iscsi_read16_task(
-		d.Context, 0, C.uint64_t(data.LBA),
+		*deviceCtx, 0, C.uint64_t(data.LBA),
 		C.uint(data.BlockSize*data.Blocks), C.int(data.BlockSize),
 		0, 0, 0, 0, 0, syncCB, pdata,
 	) == nil {
 		return nil, errors.New("unable to start iscsi_read16_task")
 	}
-	if err := d.eventLoop(state); err != nil {
+	if err := d.ProcessAsync(ctx, deviceCtx, state); err != nil {
 		return nil, fmt.Errorf("error while waiting for task completion: %w", err)
 	}
 
@@ -256,13 +326,20 @@ func (d *device) Read16(data Read16) ([]byte, error) {
 	}
 
 	if task == nil || task.status != C.SCSI_STATUS_GOOD {
-		return nil, fmt.Errorf("iscsi_read16_sync: %s", C.GoString(C.iscsi_get_error(d.Context)))
+		errstr := C.iscsi_get_error(*deviceCtx)
+		return nil, fmt.Errorf("iscsi_read16_sync: %s", C.GoString(errstr))
 	}
 	logger().Debug("Read16 done", slog.Any("length", task.datain.size))
 	return C.GoBytes(unsafe.Pointer(task.datain.data), task.datain.size), nil
 }
 
 func (d *device) Read16Async(data Read16, tasks chan TaskResult) error {
+	deviceCtx, ok := d.Context.Acquire("read-async")
+	if !ok {
+		return ErrDeviceClosed
+	}
+	defer d.Context.Release("read-async")
+
 	cdata := callbackData{
 		tasks: tasks,
 		// add the read request so the callback can tell what lba the read
@@ -272,7 +349,7 @@ func (d *device) Read16Async(data Read16, tasks chan TaskResult) error {
 	}
 	pdata := gopointer.Save(cdata)
 	// can't call unref until the callback is done
-	task := C.iscsi_read16_task(d.Context, 0, C.uint64_t(data.LBA),
+	task := C.iscsi_read16_task(*deviceCtx, 0, C.uint64_t(data.LBA),
 		C.uint(data.BlockSize*data.Blocks), C.int(data.BlockSize), 0, 0, 0, 0, 0, channelCB, pdata)
 	if task == nil {
 		return errors.New("unable to start iscsi_read16_task")
@@ -281,13 +358,13 @@ func (d *device) Read16Async(data Read16, tasks chan TaskResult) error {
 	return nil
 }
 
-func (d *device) eventLoop(state *syncCallbackState) error {
+func (d *device) eventLoop(deviceCtx *iscsiContext, state *syncCallbackState) error {
 	// TODO: (willgorman) handle a timeout (from iscsi_set_timeout)
 	// this gets set by iscsiSyncCB
 	for !state.finished {
-		events := d.WhichEvents()
+		events := d.WhichEvents(deviceCtx)
 		fd := unix.PollFd{
-			Fd:      int32(d.GetFD()),
+			Fd:      int32(d.GetFD(deviceCtx)),
 			Events:  int16(events),
 			Revents: 0,
 		}
@@ -299,9 +376,9 @@ func (d *device) eventLoop(state *syncCallbackState) error {
 		if err != nil && err != syscall.EINTR {
 			return fmt.Errorf("poll failed: %w", err)
 		}
-		if d.HandleEvents(fds[0].Revents) < 0 {
+		if d.HandleEvents(deviceCtx, fds[0].Revents) < 0 {
 			return fmt.Errorf("failed to handle events: %s",
-				C.GoString(C.iscsi_get_error(d.Context)))
+				C.GoString(C.iscsi_get_error(*deviceCtx)))
 		}
 	}
 	return nil
@@ -314,48 +391,52 @@ func (d *device) eventLoop(state *syncCallbackState) error {
 // being performed
 // TODO: i'm not sure this function even makes sense because
 // it can't run concurrently with iscsi operations
-func (d *device) ProcessAsync(ctx context.Context) error {
-	for {
+func (d *device) ProcessAsync(ctx context.Context, deviceCtx *iscsiContext, state *syncCallbackState) error {
+	for !state.finished {
 		select {
 		case <-ctx.Done():
-			return nil
+			fmt.Println("context done")
+			return ctx.Err()
 		default:
-			events := d.WhichEvents()
+			events := d.WhichEvents(deviceCtx)
 			if events == 0 {
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
+
 			fd := unix.PollFd{
-				Fd:      int32(d.GetFD()),
+				Fd:      int32(d.GetFD(deviceCtx)),
 				Events:  int16(events),
 				Revents: 0,
 			}
 
 			fds := []unix.PollFd{fd}
 			_, err := unix.Poll(fds, 1000)
-			if err != nil {
-				if err.Error() != "interrupted system call" {
-					return fmt.Errorf("Poll error: %w", err)
-				}
+			if err != nil && err != syscall.EINTR {
+				return fmt.Errorf("poll failed: %w", err)
 			}
+
 			// I think we have to call this with fds[0], not fd.
 			// fds[0] is what actually gets updated, fd is just a copy
-			if d.HandleEvents(fds[0].Revents) < 0 {
-				return errors.New("failed to handle events")
+			if d.HandleEvents(deviceCtx, fds[0].Revents) < 0 {
+				return fmt.Errorf("failed to handle events: %s",
+					C.GoString(C.iscsi_get_error(*deviceCtx)))
 			}
 		}
 	}
+
+	return nil
 }
 
-func (d *device) ProcessAsyncN(n int) error {
+func (d *device) ProcessAsyncN(deviceCtx *iscsiContext, n int) error {
 	for i := 0; i < n; i++ {
-		events := d.WhichEvents()
+		events := d.WhichEvents(deviceCtx)
 		if events == 0 {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 		fd := unix.PollFd{
-			Fd:      int32(d.GetFD()),
+			Fd:      int32(d.GetFD(deviceCtx)),
 			Events:  int16(events),
 			Revents: 0,
 		}
@@ -369,31 +450,31 @@ func (d *device) ProcessAsyncN(n int) error {
 		}
 		// I think we have to call this with fds[0], not fd.
 		// fds[0] is what actually gets updated, fd is just a copy
-		if d.HandleEvents(fds[0].Revents) < 0 {
+		if d.HandleEvents(deviceCtx, fds[0].Revents) < 0 {
 			return errors.New("failed to handle events")
 		}
 	}
 	return nil
 }
 
-func (d *device) GetFD() int {
-	return int(C.iscsi_get_fd(d.Context))
+func (d *device) GetFD(deviceCtx *iscsiContext) int {
+	return int(C.iscsi_get_fd(*deviceCtx))
 }
 
-func (d *device) WhichEvents() int {
-	return int(C.iscsi_which_events(d.Context))
+func (d *device) WhichEvents(deviceCtx *iscsiContext) int {
+	return int(C.iscsi_which_events(*deviceCtx))
 }
 
-func (d *device) HandleEvents(n int16) int {
-	return int(C.iscsi_service(d.Context, C.int(n)))
+func (d *device) HandleEvents(deviceCtx *iscsiContext, n int16) int {
+	return int(C.iscsi_service(*deviceCtx, C.int(n)))
 }
 
-func (d *device) GetQueueLength() int {
-	return int(C.iscsi_queue_length(d.Context))
+func (d *device) GetQueueLength(deviceCtx *iscsiContext) int {
+	return int(C.iscsi_queue_length(*deviceCtx))
 }
 
-func (d *device) GetOutQueueLength() int {
-	return int(C.iscsi_out_queue_length(d.Context))
+func (d *device) GetOutQueueLength(deviceCtx *iscsiContext) int {
+	return int(C.iscsi_out_queue_length(*deviceCtx))
 }
 
 func getReadCapacity10(task C.struct_scsi_task) (C.struct_scsi_readcapacity10, error) {
@@ -508,6 +589,7 @@ type TaskResult struct {
 
 //export iscsiChannelCB
 func iscsiChannelCB(iscsiCtx iscsiContext, status int, command_data, private_data unsafe.Pointer) {
+
 	defer gopointer.Unref(private_data)
 	data := gopointer.Restore(private_data).(callbackData)
 
@@ -532,9 +614,18 @@ func iscsiChannelCB(iscsiCtx iscsiContext, status int, command_data, private_dat
 
 //export iscsiSyncCB
 func iscsiSyncCB(_ iscsiContext, status int, command_data, private_data unsafe.Pointer) {
+	if command_data == nil {
+		return
+	}
+
 	task := (*C.struct_scsi_task)(command_data)
-	state := gopointer.Restore(private_data).(*syncCallbackState)
 	task.status = C.int(status)
+
+	state, ok := gopointer.Restore(private_data).(*syncCallbackState)
+	if !ok || private_data == nil {
+		return
+	}
+
 	state.status = status
 	state.finished = true
 	state.scsiTask = task
@@ -550,4 +641,31 @@ func printReadCapacity16(t *C.struct_scsi_readcapacity16) {
 	log.Printf("ptype: %d\n", t.p_type)
 	log.Printf("proten: %d\n", t.prot_en)
 	log.Printf("returnedlba: %d\n", t.returned_lba)
+}
+
+type locker[T any] struct {
+	v *T
+	sync.RWMutex
+}
+
+func (l *locker[T]) Acquire(process string) (*T, bool) {
+	logger().Debug(fmt.Sprintf("%s acquiring lock", process))
+	l.Lock()
+
+	return l.v, l.v != nil
+}
+
+func (l *locker[T]) Swap(process string, newT *T) (*T, bool) {
+	logger().Debug(fmt.Sprintf("%s acquiring lock (swap)", process))
+	l.Lock()
+
+	oldT := l.v
+	l.v = newT
+
+	return oldT, oldT != nil
+}
+
+func (l *locker[T]) Release(process string) {
+	logger().Debug(fmt.Sprintf("%s releasing lock", process))
+	l.Unlock()
 }

@@ -1,11 +1,12 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 
+	iscsi "github.com/naylorpmax-joyent/libiscsi-go"
 	"github.com/sanity-io/litter"
-	iscsi "github.com/willgorman/libiscsi-go"
 )
 
 func main() {
@@ -41,7 +42,7 @@ func main() {
 
 	litter.Dump(string(data))
 
-	err = device.Write16(iscsi.Write16{
+	err = device.Write16(context.TODO(), iscsi.Write16{
 		LBA:       0,
 		Data:      data,
 		BlockSize: capacity.BlockSize,
@@ -50,7 +51,7 @@ func main() {
 		log.Fatalln(err)
 	}
 
-	dataread, err := device.Read16(iscsi.Read16{
+	dataread, err := device.Read16(context.TODO(), iscsi.Read16{
 		LBA:       0,
 		Blocks:    1,
 		BlockSize: 512,

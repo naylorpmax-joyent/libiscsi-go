@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	iscsi "github.com/willgorman/libiscsi-go"
+	iscsi "github.com/naylorpmax-joyent/libiscsi-go"
 	"gotest.tools/assert"
 )
 
@@ -24,6 +24,7 @@ func (d *delayWriter) Write(p []byte) (n int, err error) {
 	return d.Writer.Write(p)
 }
 
+// FIXME
 func BenchmarkSingleAsyncReaderWithParallelConsumers(b *testing.B) {
 	// parameters
 	// size of the iscsi lun
@@ -83,6 +84,7 @@ func BenchmarkSingleAsyncReaderWithParallelConsumers(b *testing.B) {
 				}
 			}()
 		}
+
 		for i := 0; i < totalBlocks; i = i + blockChunk {
 			err := device.Read16Async(iscsi.Read16{
 				LBA:       i,
@@ -96,9 +98,9 @@ func BenchmarkSingleAsyncReaderWithParallelConsumers(b *testing.B) {
 			// once there are enough reads queued up,
 			// take a break from reading to process
 			// them and feed output to the consumers
-			if device.GetQueueLength() > maxQueue {
-				for device.GetQueueLength() > minQueue {
-					_ = device.ProcessAsyncN(1)
+			if device.GetQueueLength(nil) > maxQueue {
+				for device.GetQueueLength(nil) > minQueue {
+					_ = device.ProcessAsyncN(nil, 1)
 				}
 			}
 		}
@@ -110,7 +112,7 @@ func BenchmarkSingleAsyncReaderWithParallelConsumers(b *testing.B) {
 			// once all consumers are done, halt ProcessAsync
 			cancel()
 		}()
-		err = device.ProcessAsync(ctx)
+		err = device.ProcessAsync(ctx, nil, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -122,6 +124,7 @@ func BenchmarkSingleAsyncReaderWithParallelConsumers(b *testing.B) {
 // reader sends the data to a consumer that will pause
 // for some time to simulate something like a writer that may
 // be slower than the reader
+// FIXME
 func BenchmarkParallelSyncReaders(b *testing.B) {
 	// parameters
 	// size of the iscsi lun
@@ -174,7 +177,7 @@ func BenchmarkParallelSyncReaders(b *testing.B) {
 			b.Log(err)
 		}
 
-		reader, err := iscsi.Reader(device)
+		reader, err := iscsi.Reader(context.TODO(), device)
 		if err != nil {
 			b.Fail()
 			b.Log(err)
@@ -185,8 +188,8 @@ func BenchmarkParallelSyncReaders(b *testing.B) {
 		b.Logf("Created section reader starting at %d, reading %d bytes", start, readLen)
 		sectionReaders = append(sectionReaders, rdr)
 	}
-	for i := 0; i < b.N; i++ {
 
+	for i := 0; i < b.N; i++ {
 		w := sync.WaitGroup{}
 		w.Add(len(sectionReaders))
 		for _, rdr := range sectionReaders {
@@ -233,13 +236,13 @@ func BenchmarkParallelSyncReaders(b *testing.B) {
 		// 			b.Log(err)
 		// 		}
 
-		// 		reader, err := iscsi.Reader(device)
+		// 		reader, err := iscsi.Reader(context.TODO(), device)
 		// 		if err != nil {
 		// 			b.Fail()
 		// 			b.Log(err)
 		// 		}
 		// 		start := so * blockSize
-		// 		readLen := (cap.LBA * blockSize) / nreaders
+		// 		readLen := (cap.MaxLBA * blockSize) / nreaders
 		// 		rdr := io.NewSectionReader(reader, int64(start), int64(readLen))
 		// 		b.Logf("Starting at %d, reading to %d", start, readLen)
 		// 		wtr := delayWriter{io.Discard, consumerDelay}
