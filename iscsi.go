@@ -55,7 +55,7 @@ type device struct {
 	// device
 
 	closed  atomic.Bool
-	Context locker[iscsiContext]
+	context locker[iscsiContext]
 	Target  target
 }
 
@@ -84,11 +84,11 @@ func (d *device) initializeContext() error {
 	defer C.free(unsafe.Pointer(iqnStr))
 
 	newCtx := iscsiContext(C.iscsi_create_context(iqnStr))
-	oldCtx, ok := d.Context.Swap("initialize-context", &newCtx)
+	oldCtx, ok := d.context.Swap("initialize-context", &newCtx)
 	if ok {
 		_ = C.iscsi_destroy_context(*oldCtx)
 	}
-	defer d.Context.Release("initialize-context")
+	defer d.context.Release("initialize-context")
 
 	targetStr := C.CString(d.details.TargetURL)
 	defer C.free(unsafe.Pointer(targetStr))
@@ -121,11 +121,11 @@ func (d *device) Connect() error {
 			return err
 		}
 
-		ctx, ok := d.Context.Acquire("connect")
+		ctx, ok := d.context.Acquire("connect")
 		if !ok {
 			return ErrDeviceClosed
 		}
-		defer d.Context.Release("connect")
+		defer d.context.Release("connect")
 
 		portalStr := C.CString(d.Target.Portal)
 		defer C.free(unsafe.Pointer(portalStr))
@@ -139,39 +139,17 @@ func (d *device) Connect() error {
 	}, retry.Attempts(20), retry.MaxDelay(500*time.Millisecond))
 }
 
-// FIXME
-func (d *device) Reconnect() error {
-	ctx, _ := d.Context.Acquire("reconnect")
-	defer d.Context.Release("reconnect")
-
-	err := retry.Do(func() error {
-		if retval := C.iscsi_reconnect_sync(*ctx); retval != 0 {
-			errstr := C.iscsi_get_error(*ctx)
-			return fmt.Errorf("failed to reconnect with: (%d) %s", retval, C.GoString(
-				errstr,
-			))
-		}
-		return nil
-	}, retry.Attempts(20), retry.MaxDelay(500*time.Millisecond))
-	if err != nil {
-		return err
-	}
-
-	d.closed.Store(false)
-	return nil
-}
-
 func (d *device) Disconnect() error {
 	if d.closed.Load() {
 		return nil
 	}
 	defer d.closed.Store(true)
 
-	oldCtx, ok := d.Context.Swap("disconnect", nil)
+	oldCtx, ok := d.context.Swap("disconnect", nil)
 	if !ok {
 		return nil
 	}
-	defer d.Context.Release("disconnect")
+	defer d.context.Release("disconnect")
 
 	defer C.iscsi_destroy_context(*oldCtx)
 	retval := C.iscsi_logout_sync(*oldCtx)
@@ -189,11 +167,11 @@ type Capacity struct {
 }
 
 func (d *device) ReadCapacity10() (c Capacity, err error) {
-	ctx, ok := d.Context.Acquire("read-capacity")
+	ctx, ok := d.context.Acquire("read-capacity")
 	if !ok {
 		return Capacity{}, ErrDeviceClosed
 	}
-	defer d.Context.Release("read-capacity")
+	defer d.context.Release("read-capacity")
 
 	task := C.iscsi_readcapacity10_sync(*ctx, 0, 0, 0)
 	defer func() {
@@ -216,11 +194,11 @@ func (d *device) ReadCapacity10() (c Capacity, err error) {
 }
 
 func (d *device) ReadCapacity16() (c Capacity, err error) {
-	ctx, ok := d.Context.Acquire("read-capacity")
+	ctx, ok := d.context.Acquire("read-capacity")
 	if !ok {
 		return Capacity{}, ErrDeviceClosed
 	}
-	defer d.Context.Release("read-capacity")
+	defer d.context.Release("read-capacity")
 
 	task := C.iscsi_readcapacity16_sync(*ctx, 0)
 	defer func() {
@@ -249,11 +227,11 @@ type Write16 struct {
 }
 
 func (d *device) Write16(ctx context.Context, data Write16) error {
-	deviceCtx, ok := d.Context.Acquire("write")
+	deviceCtx, ok := d.context.Acquire("write")
 	if !ok {
 		return ErrDeviceClosed
 	}
-	defer d.Context.Release("write")
+	defer d.context.Release("write")
 
 	logger().Debug("Write16", slog.Any("request", data))
 	state := &syncCallbackState{}
@@ -298,11 +276,11 @@ type Read16 struct {
 }
 
 func (d *device) Read16(ctx context.Context, data Read16) ([]byte, error) {
-	deviceCtx, ok := d.Context.Acquire("read")
+	deviceCtx, ok := d.context.Acquire("read")
 	if !ok {
 		return nil, ErrDeviceClosed
 	}
-	defer d.Context.Release("read")
+	defer d.context.Release("read")
 
 	logger().Debug("Read16", slog.Any("request", data))
 	state := &syncCallbackState{}
@@ -334,11 +312,11 @@ func (d *device) Read16(ctx context.Context, data Read16) ([]byte, error) {
 }
 
 func (d *device) Read16Async(data Read16, tasks chan TaskResult) error {
-	deviceCtx, ok := d.Context.Acquire("read-async")
+	deviceCtx, ok := d.context.Acquire("read-async")
 	if !ok {
 		return ErrDeviceClosed
 	}
-	defer d.Context.Release("read-async")
+	defer d.context.Release("read-async")
 
 	cdata := callbackData{
 		tasks: tasks,
