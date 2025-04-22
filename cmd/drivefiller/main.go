@@ -7,7 +7,7 @@ import (
 	"os"
 	"strconv"
 
-	iscsi "github.com/naylorpmax-joyent/libiscsi-go"
+	iscsi "github.com/joyent/libiscsi-go"
 )
 
 func main() {

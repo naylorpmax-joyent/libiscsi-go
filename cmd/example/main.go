@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 
-	iscsi "github.com/naylorpmax-joyent/libiscsi-go"
+	iscsi "github.com/joyent/libiscsi-go"
 	"github.com/sanity-io/litter"
 )
 

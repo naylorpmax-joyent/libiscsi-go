@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	iscsi "github.com/naylorpmax-joyent/libiscsi-go"
+	iscsi "github.com/joyent/libiscsi-go"
 	"gotest.tools/assert"
 )
 

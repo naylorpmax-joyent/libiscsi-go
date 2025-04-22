@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	iscsi "github.com/naylorpmax-joyent/libiscsi-go"
+	iscsi "github.com/joyent/libiscsi-go"
 )
 
 func main() {
@@ -50,12 +50,6 @@ func main() {
 	// close the device; this will happen after the write times out
 	time.Sleep(3 * time.Second)
 	writer.Close()
-
-	// FIXME: reuse the device now that it's been closed
-	// `#1: failed to reconnect with: (-1)`
-	// if err := dev.Reconnect(); err != nil {
-	// 	panic(fmt.Errorf("error reconnecting to device: %v", err))
-	// }
 
 	ctx = context.Background()
 	if err := dev.Connect(); err != nil {
